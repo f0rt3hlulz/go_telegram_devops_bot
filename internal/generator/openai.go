@@ -25,7 +25,7 @@ const (
 	defaultTemperature         = 1.0
 	defaultPromptCostPer1K     = 0.01
 	defaultCompletionCostPer1K = 0.03
-	requestTimeout             = 45 * time.Second
+	requestTimeout             = 90 * time.Second
 )
 
 // Result represents the outcome of a generator call, including token usage and estimated cost.
