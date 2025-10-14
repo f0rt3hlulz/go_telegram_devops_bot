@@ -3,6 +3,7 @@
 Go-based Telegram bot that quizzes you with mid-to-senior DevOps interview questions. It supports an automatic schedule (every 30 minutes by default), on-demand questions, topic filtering, and spoiler-protected answers so you can self-assess.
 
 ## Features
+- Telegram quiz polls with spoilered explanations so you can answer interactively and reveal feedback in the same message.
 - Dynamic questions via OpenAI (set `OPENAI_API_KEY`) with automatic fallback to a curated on-disk bank covering Ansible, Docker, Linux, Kubernetes, GitLab CI, Bash, Python, Nginx, HAProxy, Grafana, Prometheus, ELK, SQL, ClickHouse, and general DevOps practices.
 - `/question` command for instant quizzes, optionally filtered by topic (e.g. `/question kubernetes`).
 - `/subscribe` (or `/start`) to opt-in to the automatic 30-minute rotation; `/unsubscribe` stops it.

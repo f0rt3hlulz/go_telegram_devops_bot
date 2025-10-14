@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -265,6 +266,17 @@ func (b *QuestionBot) sendFromBank(chatID int64, topic string) error {
 }
 
 func (b *QuestionBot) deliverQuestion(chatID int64, q questions.Question) error {
+	if poll := buildPoll(chatID, q); poll != nil {
+		if _, err := b.api.Send(poll); err == nil {
+			return nil
+		}
+		log.Printf("send poll failed for chat %d; falling back to text message", chatID)
+	}
+
+	return b.sendFallbackMessage(chatID, q)
+}
+
+func (b *QuestionBot) sendFallbackMessage(chatID int64, q questions.Question) error {
 	body := buildQuestionMessage(q)
 	msg := tgbotapi.NewMessage(chatID, body)
 	msg.DisableWebPagePreview = true
@@ -353,6 +365,113 @@ func (b *QuestionBot) subscribers() []int64 {
 		out = append(out, chatID)
 	}
 	return out
+}
+
+const (
+	pollQuestionMaxLen    = 280
+	pollExplanationMaxLen = 190
+	pollOptionMaxLen      = 90
+)
+
+func buildPoll(chatID int64, q questions.Question) *tgbotapi.SendPollConfig {
+	if len(q.Options) < 2 {
+		return nil
+	}
+
+	question := buildPollQuestion(q)
+	options := make([]string, len(q.Options))
+	correctIdx := -1
+	for i, opt := range q.Options {
+		trimmed := strings.TrimSpace(opt)
+		if correctIdx == -1 && trimmed == strings.TrimSpace(q.Answer) {
+			correctIdx = i
+		}
+		options[i] = truncateRunes(trimmed, pollOptionMaxLen)
+	}
+
+	if correctIdx == -1 {
+		truncatedAnswer := truncateRunes(strings.TrimSpace(q.Answer), pollOptionMaxLen)
+		for i, opt := range options {
+			if opt == truncatedAnswer {
+				correctIdx = i
+				break
+			}
+		}
+	}
+	if correctIdx < 0 {
+		return nil
+	}
+
+	poll := tgbotapi.NewPoll(chatID, question, options...)
+	poll.Type = "quiz"
+	poll.IsAnonymous = false
+	poll.CorrectOptionID = int64(correctIdx)
+
+	explanation := buildPollExplanation(q)
+	if explanation != "" {
+		poll.Explanation = explanation
+		poll.ExplanationParseMode = "MarkdownV2"
+	}
+
+	return &poll
+}
+
+func buildPollQuestion(q questions.Question) string {
+	header := q.Prompt
+	header = strings.TrimSpace(header)
+	if header == "" {
+		header = "Select the correct answer"
+	}
+
+	prefix := strings.TrimSpace(q.Topic)
+	level := strings.TrimSpace(q.Level)
+	if prefix != "" && level != "" {
+		prefix = fmt.Sprintf("%s (%s)", prefix, level)
+	} else if level != "" {
+		prefix = level
+	}
+
+	if prefix != "" {
+		header = fmt.Sprintf("%s — %s", prefix, header)
+	}
+
+	return truncateRunes(header, pollQuestionMaxLen)
+}
+
+func buildPollExplanation(q questions.Question) string {
+	content := []string{
+		"Correct answer: " + q.Answer,
+	}
+	if strings.TrimSpace(q.Explanation) != "" {
+		content = append(content, "Why: "+q.Explanation)
+	}
+
+	body := escapeMarkdownV2(strings.Join(content, "\n"))
+	if body == "" {
+		return ""
+	}
+
+	if utf8.RuneCountInString(body) > pollExplanationMaxLen-4 {
+		body = truncateRunes(body, pollExplanationMaxLen-4)
+	}
+
+	return "||" + body + "||"
+}
+
+func truncateRunes(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= limit {
+		return s
+	}
+	runes := []rune(s)
+	runes = runes[:limit]
+	// Avoid leaving a dangling escape character that would break MarkdownV2.
+	if len(runes) > 0 && runes[len(runes)-1] == '\\' {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes)
 }
 
 func buildQuestionMessage(q questions.Question) string {
