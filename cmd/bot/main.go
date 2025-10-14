@@ -757,13 +757,13 @@ func buildQuestionHTML(q questions.Question, lang languageOption) string {
 		sb.WriteString(html.EscapeString(q.Level))
 		sb.WriteString(")")
 	}
-	sb.WriteString("<br/><br/>")
+	sb.WriteString("<br><br>")
 	sb.WriteString(html.EscapeString(q.Prompt))
-	sb.WriteString("<br/><br/>")
+	sb.WriteString("<br><br>")
 	for idx, opt := range q.Options {
-		sb.WriteString(fmt.Sprintf("<b>%s.</b> %s<br/>", optionLetter(idx), html.EscapeString(opt)))
+		sb.WriteString(fmt.Sprintf("<b>%s.</b> %s<br>", optionLetter(idx), html.EscapeString(opt)))
 	}
-	sb.WriteString("<br/>")
+	sb.WriteString("<br>")
 	sb.WriteString(html.EscapeString(lang.RevealInstruction))
 	return sb.String()
 }
@@ -785,20 +785,20 @@ func buildOptionsKeyboard(q questions.Question) tgbotapi.InlineKeyboardMarkup {
 func buildAnsweredHTML(baseHTML string, entry pendingQuestion, selectedIdx, correctIdx int) string {
 	var sb strings.Builder
 	sb.WriteString(baseHTML)
-	sb.WriteString("<br/><br/><b>")
+	sb.WriteString("<br><br><b>")
 	if selectedIdx == correctIdx {
 		sb.WriteString(html.EscapeString(entry.Lang.CorrectFeedback))
 	} else {
 		sb.WriteString(html.EscapeString(entry.Lang.IncorrectFeedback))
 	}
-	sb.WriteString("</b><br/>")
+	sb.WriteString("</b><br>")
 
 	if selectedIdx >= 0 && selectedIdx < len(entry.Question.Options) {
 		sb.WriteString("<b>")
 		sb.WriteString(html.EscapeString(entry.Lang.YourAnswerLabel))
 		sb.WriteString(":</b> ")
 		sb.WriteString(html.EscapeString(entry.Question.Options[selectedIdx]))
-		sb.WriteString("<br/>")
+		sb.WriteString("<br>")
 	}
 
 	correctText := entry.Question.Answer
@@ -808,7 +808,7 @@ func buildAnsweredHTML(baseHTML string, entry pendingQuestion, selectedIdx, corr
 	sb.WriteString(html.EscapeString(correctText))
 
 	if strings.TrimSpace(entry.Question.Explanation) != "" {
-		sb.WriteString("<br/><b>")
+		sb.WriteString("<br><b>")
 		sb.WriteString(html.EscapeString(entry.Lang.WhyLabel))
 		sb.WriteString(":</b> ")
 		sb.WriteString(htmlize(entry.Question.Explanation))
@@ -816,12 +816,12 @@ func buildAnsweredHTML(baseHTML string, entry pendingQuestion, selectedIdx, corr
 	sb.WriteString("</span>")
 
 	if entry.Result.PromptTokens > 0 || entry.Result.CompletionTokens > 0 {
-		sb.WriteString("<br/><br/><b>")
+		sb.WriteString("<br><br><b>")
 		sb.WriteString(html.EscapeString(entry.Lang.TokensLabel))
 		sb.WriteString(":</b> ")
 		sb.WriteString(fmt.Sprintf("%d/%d/%d", entry.Result.PromptTokens, entry.Result.CompletionTokens, entry.Result.TotalTokens))
 		if entry.Result.CostUSD > 0 {
-			sb.WriteString("<br/><b>")
+			sb.WriteString("<br><b>")
 			sb.WriteString(html.EscapeString(entry.Lang.CostLabel))
 			sb.WriteString(":</b> $")
 			sb.WriteString(fmt.Sprintf("%.4f", entry.Result.CostUSD))
@@ -833,7 +833,7 @@ func buildAnsweredHTML(baseHTML string, entry pendingQuestion, selectedIdx, corr
 
 func htmlize(text string) string {
 	escaped := html.EscapeString(text)
-	return strings.ReplaceAll(escaped, "\n", "<br/>")
+	return strings.ReplaceAll(escaped, "\n", "<br>")
 }
 
 func findCorrectOptionIndex(q questions.Question) int {
