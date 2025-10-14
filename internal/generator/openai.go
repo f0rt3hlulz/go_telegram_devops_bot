@@ -19,25 +19,43 @@ const (
 - Focus on depth: configuration gotchas, performance tuning, production incident handling, architecture choices, CI/CD troubleshooting, observability, etc.
 - Prefer topics named by the user when provided; otherwise rotate through the domains to keep variety.
 - Always produce four answer options with only one correct answer. Make the distractors plausible but clearly wrong for an expert.
-- Answers must reveal why they are correct in a concise explanation.`
-	defaultModel       = "gpt-5"
-	defaultTemperature = 1.0
-	requestTimeout     = 45 * time.Second
+- Answers must reveal why they are correct in a concise explanation.
+- Explanations must teach: include actionable guidance, common pitfalls, and next steps for deeper mastery.`
+	defaultModel               = "gpt-5"
+	defaultTemperature         = 1.0
+	defaultPromptCostPer1K     = 0.01
+	defaultCompletionCostPer1K = 0.03
+	requestTimeout             = 45 * time.Second
 )
+
+// Result represents the outcome of a generator call, including token usage and estimated cost.
+type Result struct {
+	Question         questions.Question
+	Model            string
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	CostUSD          float64
+	Language         string
+}
 
 // Config contains the OpenAI generator settings.
 type Config struct {
-	APIKey      string
-	BaseURL     string
-	Model       string
-	Temperature float32
+	APIKey              string
+	BaseURL             string
+	Model               string
+	Temperature         float32
+	PromptCostPer1K     float64
+	CompletionCostPer1K float64
 }
 
 // OpenAIGenerator fetches questions from OpenAI's chat completion endpoint.
 type OpenAIGenerator struct {
-	client      *openai.Client
-	model       string
-	temperature float32
+	client              *openai.Client
+	model               string
+	temperature         float32
+	promptCostPer1K     float64
+	completionCostPer1K float64
 }
 
 // NewOpenAIGenerator returns a generator configured with the provided settings.
@@ -61,22 +79,37 @@ func NewOpenAIGenerator(cfg Config) (*OpenAIGenerator, error) {
 		temp = defaultTemperature
 	}
 
+	promptCost := cfg.PromptCostPer1K
+	if promptCost <= 0 {
+		promptCost = defaultPromptCostPer1K
+	}
+	completionCost := cfg.CompletionCostPer1K
+	if completionCost <= 0 {
+		completionCost = defaultCompletionCostPer1K
+	}
+
 	return &OpenAIGenerator{
-		client:      client,
-		model:       model,
-		temperature: temp,
+		client:              client,
+		model:               model,
+		temperature:         temp,
+		promptCostPer1K:     promptCost,
+		completionCostPer1K: completionCost,
 	}, nil
 }
 
 // Generate requests a new interview question from OpenAI. The call respects the provided context and times out automatically.
-func (g *OpenAIGenerator) Generate(ctx context.Context, topic string) (questions.Question, error) {
+func (g *OpenAIGenerator) Generate(ctx context.Context, topic, language string) (Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
-	payload := buildPrompt(topic)
+	lang := strings.TrimSpace(language)
+	if lang == "" {
+		lang = "English"
+	}
+	payload := buildPrompt(topic, lang)
 
 	resp, err := g.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 		Model:       g.model,
@@ -96,27 +129,54 @@ func (g *OpenAIGenerator) Generate(ctx context.Context, topic string) (questions
 		},
 	})
 	if err != nil {
-		return questions.Question{}, err
+		return Result{}, err
 	}
 
 	if len(resp.Choices) == 0 {
-		return questions.Question{}, errors.New("empty completion choices")
+		return Result{}, errors.New("empty completion choices")
 	}
 
 	content := strings.TrimSpace(resp.Choices[0].Message.Content)
 	if content == "" {
-		return questions.Question{}, errors.New("empty completion content")
+		return Result{}, errors.New("empty completion content")
 	}
 
-	return parseQuestionJSON(content)
+	question, err := parseQuestionJSON(content)
+	if err != nil {
+		return Result{}, err
+	}
+
+	result := Result{
+		Question: question,
+		Model:    g.model,
+		Language: lang,
+	}
+
+	usage := resp.Usage
+	result.PromptTokens = usage.PromptTokens
+	result.CompletionTokens = usage.CompletionTokens
+	result.TotalTokens = usage.TotalTokens
+	if usage.PromptTokens > 0 || usage.CompletionTokens > 0 {
+		inputCost := (float64(result.PromptTokens) / 1000.0) * g.promptCostPer1K
+		outputCost := (float64(result.CompletionTokens) / 1000.0) * g.completionCostPer1K
+		result.CostUSD = inputCost + outputCost
+	}
+
+	return result, nil
 }
 
-func buildPrompt(topic string) string {
+func buildPrompt(topic, language string) string {
 	topic = strings.TrimSpace(topic)
-	if topic == "" {
-		return `Produce a single new interview question grounded in the listed DevOps domains. Respond strictly as JSON with keys: topic, level, prompt, options (array of 4 strings), answer (must match one option exactly), explanation.`
+	lang := strings.TrimSpace(language)
+	if lang == "" {
+		lang = "English"
 	}
-	return fmt.Sprintf(`Produce a single new interview question focused on %q. Respond strictly as JSON with keys: topic, level, prompt, options (array of 4 strings), answer (must match one option exactly), explanation.`, topic)
+	template := `Produce a single new interview question grounded in the listed DevOps domains. The entire output must be written in %s. Structure the explanation as a mini lesson: start with a concise summary, then provide step-by-step reasoning, and finish with bullet-point practical takeaways. Respond strictly as JSON with keys: topic, level, prompt, options (array of 4 strings), answer (must match one option exactly), explanation.`
+	if topic != "" {
+		template = `Produce a single new interview question focused on %q. The entire output must be written in %s. Structure the explanation as a mini lesson: start with a concise summary, then provide step-by-step reasoning, and finish with bullet-point practical takeaways. Respond strictly as JSON with keys: topic, level, prompt, options (array of 4 strings), answer (must match one option exactly), explanation.`
+		return fmt.Sprintf(template, topic, lang)
+	}
+	return fmt.Sprintf(template, lang)
 }
 
 type rawQuestion struct {
