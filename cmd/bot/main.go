@@ -183,6 +183,10 @@ func (b *QuestionBot) consumeUpdates(ctx context.Context) error {
 			if !ok {
 				return errors.New("updates channel closed")
 			}
+			if update.CallbackQuery != nil {
+				b.handleCallback(update.CallbackQuery)
+				continue
+			}
 			if update.Message == nil {
 				continue
 			}
@@ -239,15 +243,57 @@ func (b *QuestionBot) handleMessage(msg *tgbotapi.Message) {
 	}
 }
 
+func (b *QuestionBot) handleCallback(query *tgbotapi.CallbackQuery) {
+	if query == nil || query.Data == "" {
+		return
+	}
+
+	if !strings.HasPrefix(query.Data, callbackNextPrefix) {
+		if _, err := b.api.Request(tgbotapi.NewCallback(query.ID, "")); err != nil {
+			log.Printf("answer callback failed: %v", err)
+		}
+		return
+	}
+
+	topic := decodeTopicFromCallback(query.Data)
+	if query.Message == nil || query.Message.Chat == nil {
+		if _, err := b.api.Request(tgbotapi.NewCallback(query.ID, "")); err != nil {
+			log.Printf("answer callback failed: %v", err)
+		}
+		return
+	}
+
+	if _, err := b.api.Request(tgbotapi.NewCallback(query.ID, "")); err != nil {
+		log.Printf("answer callback failed: %v", err)
+	}
+
+	if err := b.sendQuestion(query.Message.Chat.ID, topic); err != nil {
+		b.replyPlain(query.Message.Chat.ID, fmt.Sprintf("Could not fetch the next question: %v", err))
+	}
+}
+
 func (b *QuestionBot) sendQuestion(chatID int64, topic string) error {
+	delivered := false
 	if b.generator != nil {
 		q, err := b.generator.Generate(context.Background(), topic)
 		if err == nil {
-			return b.deliverQuestion(chatID, q)
+			if err := b.deliverQuestion(chatID, q); err == nil {
+				delivered = true
+			} else {
+				log.Printf("deliver generated question failed: %v", err)
+			}
+		} else {
+			log.Printf("OpenAI generator failed, falling back to local bank: %v", err)
 		}
-		log.Printf("OpenAI generator failed, falling back to local bank: %v", err)
 	}
-	return b.sendFromBank(chatID, topic)
+	if !delivered {
+		if err := b.sendFromBank(chatID, topic); err != nil {
+			return err
+		}
+	}
+
+	b.sendNextPrompt(chatID, topic)
+	return nil
 }
 
 func (b *QuestionBot) sendFromBank(chatID int64, topic string) error {
@@ -371,7 +417,47 @@ const (
 	pollQuestionMaxLen    = 280
 	pollExplanationMaxLen = 190
 	pollOptionMaxLen      = 90
+
+	callbackNextPrefix = "next|"
+	maxCallbackTopic   = 48
 )
+
+func (b *QuestionBot) sendNextPrompt(chatID int64, topic string) {
+	markup := nextButtonMarkup(topic)
+	msg := tgbotapi.NewMessage(chatID, "Need another question?")
+	msg.DisableWebPagePreview = true
+	msg.ReplyMarkup = markup
+	if _, err := b.api.Send(msg); err != nil {
+		log.Printf("send next prompt failed: %v", err)
+	}
+}
+
+func nextButtonMarkup(topic string) tgbotapi.InlineKeyboardMarkup {
+	data := callbackNextPrefix + encodeTopicForCallback(topic)
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Next question", data),
+		),
+	)
+}
+
+func encodeTopicForCallback(topic string) string {
+	topic = strings.ToLower(strings.TrimSpace(topic))
+	topic = strings.ReplaceAll(topic, " ", "_")
+	if utf8.RuneCountInString(topic) > maxCallbackTopic {
+		topic = truncateRunes(topic, maxCallbackTopic)
+	}
+	return topic
+}
+
+func decodeTopicFromCallback(data string) string {
+	if !strings.HasPrefix(data, callbackNextPrefix) {
+		return ""
+	}
+	topic := strings.TrimPrefix(data, callbackNextPrefix)
+	topic = strings.ReplaceAll(topic, "_", " ")
+	return strings.TrimSpace(topic)
+}
 
 func buildPoll(chatID int64, q questions.Question) *tgbotapi.SendPollConfig {
 	if len(q.Options) < 2 {
