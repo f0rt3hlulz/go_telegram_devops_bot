@@ -3,7 +3,7 @@
 Go-based Telegram bot that quizzes you with mid-to-senior DevOps interview questions. It supports an automatic schedule (every 30 minutes by default), on-demand questions, topic filtering, and spoiler-protected answers so you can self-assess.
 
 ## Features
-- Telegram quiz polls with spoilered explanations so you can answer interactively and reveal feedback in the same message.
+- Single-message quizzes with inline answer buttons and spoilered explanations, so everything stays in one Telegram message.
 - Inline "Next question" button to queue a fresh quiz without typing commands.
 - Token usage and cost estimates per generated question, plus `/stats` to see totals since startup.
 - Telegram typing indicator while questions are being generated so you can see progress.
@@ -63,7 +63,7 @@ go build -o devops-bot ./cmd/bot
 
 ## Customisation
 - **Change the schedule**: set `QUESTION_INTERVAL_MINUTES` to any positive integer.
-- **Extend the question bank**: edit `internal/questions/questions.go` and append to `defaultQuestions`.
+- **Adjust topic suggestions**: edit `internal/questions/questions.go` if you want `/topics` to list a different set of cue phrases.
 - **Integrate an external generator**: replace `questions.DefaultBank()` in `cmd/bot/main.go` with a provider that calls an API such as OpenAI, while preserving the `Question` struct contract.
 - **Health endpoint**: override `HEALTH_ADDR` (default `:8080`); set to `disabled` or `-` to turn it off.
 - **Quiet hours**: override `QUIET_HOURS_START`, `QUIET_HOURS_END`, and `QUIET_HOURS_TZ` (defaults 23–08 in Asia/Dubai). Set either start or end to `disabled`/`-` to turn the feature off.
@@ -99,5 +99,5 @@ The Dockerfile provides:
 - Subscribers are tracked in-memory; restart the bot to reset subscriptions.
 - Keep your `.env` or environment variables out of version control to protect credentials.
 - The bot uses basic throttling between broadcasts to respect Telegram rate limits; adjust the 500ms pause if you serve many chats.
-- Each generated question includes token counts and cost in the poll’s explanation; use `/stats` for totals.
+- Each generated question includes token counts and cost in the spoilered explanation; use `/stats` for totals.
 - If the OpenAI API is unavailable, the bot reports an error so you can retry once the service recovers.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"os"
@@ -14,12 +15,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"go_devops_telegram_bot/internal/generator"
 	"go_devops_telegram_bot/internal/questions"
+
+	_ "time/tzdata"
 )
 
 const (
@@ -50,12 +52,18 @@ type languageOption struct {
 	Name                string
 	NextButton          string
 	TopicLabel          string
+	RevealInstruction   string
 	CorrectAnswerLabel  string
 	WhyLabel            string
+	YourAnswerLabel     string
+	TokensLabel         string
+	CostLabel           string
 	GeneratingMessage   string
 	ReadyTemplate       string
 	ReadyTemplateNoCost string
 	GenerationFailed    string
+	CorrectFeedback     string
+	IncorrectFeedback   string
 }
 
 var languageOptions = map[string]languageOption{
@@ -64,24 +72,36 @@ var languageOptions = map[string]languageOption{
 		Name:                "English",
 		NextButton:          "Next question",
 		TopicLabel:          "Topic",
+		RevealInstruction:   "Select an option to reveal the detailed explanation.",
 		CorrectAnswerLabel:  "Correct answer",
 		WhyLabel:            "Why",
+		YourAnswerLabel:     "Your answer",
+		TokensLabel:         "Tokens",
+		CostLabel:           "Cost",
 		GeneratingMessage:   "⚙️ Generating a new question...",
-		ReadyTemplate:       "✅ Question ready!\nTokens — prompt: %d, completion: %d, total: %d.\nApprox cost: $%.4f.\nVote in the poll below.",
-		ReadyTemplateNoCost: "✅ Question ready!\nTokens — prompt: %d, completion: %d, total: %d.\nVote in the poll below.",
+		ReadyTemplate:       "✅ Question ready! Tokens — prompt: %d, completion: %d, total: %d. Approx cost: $%.4f.",
+		ReadyTemplateNoCost: "✅ Question ready! Tokens — prompt: %d, completion: %d, total: %d.",
 		GenerationFailed:    "❌ Couldn't generate a question right now. Please try again in a moment.",
+		CorrectFeedback:     "✅ Correct!",
+		IncorrectFeedback:   "❌ Not quite",
 	},
 	"ru": {
 		Code:                "ru",
 		Name:                "Russian",
 		NextButton:          "Следующий вопрос",
 		TopicLabel:          "Тема",
+		RevealInstruction:   "Выберите вариант — объяснение откроется в спойлере.",
 		CorrectAnswerLabel:  "Правильный ответ",
 		WhyLabel:            "Почему",
+		YourAnswerLabel:     "Ваш ответ",
+		TokensLabel:         "Токены",
+		CostLabel:           "Стоимость",
 		GeneratingMessage:   "⚙️ Генерирую новый вопрос...",
-		ReadyTemplate:       "✅ Вопрос готов!\nТокены — prompt: %d, completion: %d, всего: %d.\nПримерная стоимость: $%.4f.\nОцени варианты в опросе ниже.",
-		ReadyTemplateNoCost: "✅ Вопрос готов!\nТокены — prompt: %d, completion: %d, всего: %d.\nОцени варианты в опросе ниже.",
+		ReadyTemplate:       "✅ Вопрос готов! Токены — prompt: %d, completion: %d, всего: %d. Примерная стоимость: $%.4f.",
+		ReadyTemplateNoCost: "✅ Вопрос готов! Токены — prompt: %d, completion: %d, всего: %d.",
 		GenerationFailed:    "❌ Не удалось сгенерировать вопрос. Попробуйте чуть позже.",
+		CorrectFeedback:     "✅ Верно!",
+		IncorrectFeedback:   "❌ Неверно",
 	},
 }
 
@@ -208,12 +228,24 @@ type QuestionBot struct {
 		mu      sync.RWMutex
 		perChat map[int64]string
 	}
-	quiet quietWindow
-	stats usageTracker
+	quiet   quietWindow
+	stats   usageTracker
+	pending struct {
+		mu        sync.Mutex
+		byMessage map[int]pendingQuestion
+	}
 }
 
 type questionGenerator interface {
 	Generate(ctx context.Context, topic, language string) (generator.Result, error)
+}
+
+type pendingQuestion struct {
+	Question questions.Question
+	Result   generator.Result
+	Lang     languageOption
+	Topic    string
+	BaseHTML string
 }
 
 // NewQuestionBot constructs a bot instance.
@@ -227,6 +259,7 @@ func NewQuestionBot(api *tgbotapi.BotAPI, bank *questions.Bank, interval time.Du
 	}
 	b.subscriber.chats = make(map[int64]struct{})
 	b.language.perChat = make(map[int64]string)
+	b.pending.byMessage = make(map[int]pendingQuestion)
 	return b
 }
 
@@ -328,27 +361,32 @@ func (b *QuestionBot) handleCallback(query *tgbotapi.CallbackQuery) {
 		return
 	}
 
-	if !strings.HasPrefix(query.Data, callbackNextPrefix) {
-		if _, err := b.api.Request(tgbotapi.NewCallback(query.ID, "")); err != nil {
-			log.Printf("answer callback failed: %v", err)
-		}
+	if strings.HasPrefix(query.Data, callbackAnswerPrefix) {
+		b.handleAnswerCallback(query)
 		return
 	}
 
-	topic := decodeTopicFromCallback(query.Data)
-	if query.Message == nil || query.Message.Chat == nil {
+	if strings.HasPrefix(query.Data, callbackNextPrefix) {
+		topic := decodeTopicFromCallback(query.Data)
+		if query.Message == nil || query.Message.Chat == nil {
+			if _, err := b.api.Request(tgbotapi.NewCallback(query.ID, "")); err != nil {
+				log.Printf("answer callback failed: %v", err)
+			}
+			return
+		}
+
 		if _, err := b.api.Request(tgbotapi.NewCallback(query.ID, "")); err != nil {
 			log.Printf("answer callback failed: %v", err)
+		}
+
+		if err := b.sendQuestion(query.Message.Chat.ID, topic); err != nil {
+			log.Printf("callback question failed for chat %d: %v", query.Message.Chat.ID, err)
 		}
 		return
 	}
 
 	if _, err := b.api.Request(tgbotapi.NewCallback(query.ID, "")); err != nil {
 		log.Printf("answer callback failed: %v", err)
-	}
-
-	if err := b.sendQuestion(query.Message.Chat.ID, topic); err != nil {
-		log.Printf("callback question failed for chat %d: %v", query.Message.Chat.ID, err)
 	}
 }
 
@@ -380,8 +418,17 @@ func (b *QuestionBot) sendQuestion(chatID int64, topic string) error {
 		return err
 	}
 
-	if err := b.deliverPoll(chatID, res.Question, lang, topic, &res); err != nil {
-		log.Printf("send poll failed: %v", err)
+	baseHTML := buildQuestionHTML(res.Question, lang)
+	markup := buildOptionsKeyboard(res.Question)
+
+	msg := tgbotapi.NewMessage(chatID, baseHTML)
+	msg.ParseMode = "HTML"
+	msg.DisableWebPagePreview = true
+	msg.ReplyMarkup = markup
+
+	sent, err := b.api.Send(msg)
+	if err != nil {
+		log.Printf("send question message failed: %v", err)
 		if statusErr == nil {
 			_, _ = b.api.Send(tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, lang.GenerationFailed))
 		} else {
@@ -390,32 +437,77 @@ func (b *QuestionBot) sendQuestion(chatID int64, topic string) error {
 		return err
 	}
 
-	b.stats.record(&res)
-
 	if statusErr == nil {
-		readyText := formatReadyMessage(lang, &res)
-		_, _ = b.api.Send(tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, readyText))
+		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(chatID, statusMsg.MessageID))
 	}
 
+	b.stats.record(&res)
+
+	b.pending.mu.Lock()
+	b.pending.byMessage[sent.MessageID] = pendingQuestion{
+		Question: res.Question,
+		Result:   res,
+		Lang:     lang,
+		Topic:    topic,
+		BaseHTML: baseHTML,
+	}
+	b.pending.mu.Unlock()
+
+	cost := res.CostUSD
+	log.Printf("question sent to chat %d | topic=%s | answer=%s | cost=$%.4f", chatID, res.Question.Topic, res.Question.Answer, cost)
 	return nil
 }
 
-func (b *QuestionBot) deliverPoll(chatID int64, q questions.Question, lang languageOption, topic string, res *generator.Result) error {
-	poll := buildPoll(chatID, q, lang, topic, res)
-	if poll == nil {
-		return errors.New("unable to build poll")
+func (b *QuestionBot) handleAnswerCallback(query *tgbotapi.CallbackQuery) {
+	if query.Message == nil || query.Message.Chat == nil {
+		return
 	}
 
-	if _, err := b.api.Send(poll); err != nil {
-		return err
+	idxStr := strings.TrimPrefix(query.Data, callbackAnswerPrefix)
+	choice, err := strconv.Atoi(idxStr)
+	if err != nil {
+		if _, err := b.api.Request(tgbotapi.NewCallback(query.ID, "")); err != nil {
+			log.Printf("answer callback failed: %v", err)
+		}
+		return
 	}
 
-	cost := 0.0
-	if res != nil {
-		cost = res.CostUSD
+	entry, ok := b.popPending(query.Message.MessageID)
+	if !ok {
+		if _, err := b.api.Request(tgbotapi.NewCallback(query.ID, "")); err != nil {
+			log.Printf("answer callback failed: %v", err)
+		}
+		return
 	}
-	log.Printf("question sent to chat %d | topic=%s | answer=%s | cost=$%.4f", chatID, q.Topic, q.Answer, cost)
-	return nil
+
+	correctIdx := findCorrectOptionIndex(entry.Question)
+	if correctIdx < 0 {
+		correctIdx = 0
+	}
+
+	feedback := entry.Lang.IncorrectFeedback
+	if choice == correctIdx {
+		feedback = entry.Lang.CorrectFeedback
+	}
+
+	answeredHTML := buildAnsweredHTML(entry.BaseHTML, entry, choice, correctIdx)
+
+	edit := tgbotapi.NewEditMessageTextAndMarkup(query.Message.Chat.ID, query.Message.MessageID, answeredHTML, nextButtonMarkup(entry.Topic, entry.Lang))
+	edit.ParseMode = "HTML"
+
+	if _, err := b.api.Send(edit); err != nil {
+		log.Printf("edit answered message failed: %v", err)
+	}
+
+	if _, err := b.api.Request(tgbotapi.NewCallback(query.ID, feedback)); err != nil {
+		log.Printf("answer callback failed: %v", err)
+	}
+
+	selectedText := ""
+	if choice >= 0 && choice < len(entry.Question.Options) {
+		selectedText = entry.Question.Options[choice]
+	}
+	log.Printf("answer recorded for chat %d | topic=%s | selected=%s | correct=%s | cost=$%.4f", query.Message.Chat.ID, entry.Question.Topic, selectedText, entry.Question.Answer, entry.Result.CostUSD)
 }
 
 func (b *QuestionBot) replyPlain(chatID int64, text string) {
@@ -495,12 +587,9 @@ func (b *QuestionBot) subscribers() []int64 {
 }
 
 const (
-	pollQuestionMaxLen    = 280
-	pollExplanationMaxLen = 190
-	pollOptionMaxLen      = 90
-
-	callbackNextPrefix = "next|"
-	maxCallbackTopic   = 48
+	callbackAnswerPrefix = "ans|"
+	callbackNextPrefix   = "next|"
+	maxCallbackTopic     = 48
 )
 
 func nextButtonMarkup(topic string, lang languageOption) tgbotapi.InlineKeyboardMarkup {
@@ -515,8 +604,9 @@ func nextButtonMarkup(topic string, lang languageOption) tgbotapi.InlineKeyboard
 func encodeTopicForCallback(topic string) string {
 	topic = strings.ToLower(strings.TrimSpace(topic))
 	topic = strings.ReplaceAll(topic, " ", "_")
-	if utf8.RuneCountInString(topic) > maxCallbackTopic {
-		topic = truncateRunes(topic, maxCallbackTopic)
+	runes := []rune(topic)
+	if len(runes) > maxCallbackTopic {
+		topic = string(runes[:maxCallbackTopic])
 	}
 	return topic
 }
@@ -625,9 +715,8 @@ func (u *usageTracker) snapshot() usageSnapshot {
 func (b *QuestionBot) sendUsageStats(chatID int64) {
 	snap := b.stats.snapshot()
 
-	local := snap.totalQuestions - snap.generatedQuestions
 	lines := []string{
-		fmt.Sprintf("Questions sent: %d (GPT-5: %d, local: %d)", snap.totalQuestions, snap.generatedQuestions, local),
+		fmt.Sprintf("Questions sent: %d", snap.totalQuestions),
 		fmt.Sprintf("Prompt tokens: %d", snap.promptTokens),
 		fmt.Sprintf("Completion tokens: %d", snap.completionTokens),
 		fmt.Sprintf("Approximate cost: $%.4f", snap.costUSD),
@@ -646,154 +735,119 @@ func (b *QuestionBot) sendUsageStats(chatID int64) {
 		log.Printf("send stats failed: %v", err)
 	}
 }
+func (b *QuestionBot) popPending(messageID int) (pendingQuestion, bool) {
+	b.pending.mu.Lock()
+	defer b.pending.mu.Unlock()
 
-func formatReadyMessage(lang languageOption, res *generator.Result) string {
-	if res == nil {
-		return lang.GenerationFailed
+	entry, ok := b.pending.byMessage[messageID]
+	if ok {
+		delete(b.pending.byMessage, messageID)
 	}
-
-	if res.CostUSD > 0 {
-		return fmt.Sprintf(lang.ReadyTemplate, res.PromptTokens, res.CompletionTokens, res.TotalTokens, res.CostUSD)
-	}
-
-	return fmt.Sprintf(lang.ReadyTemplateNoCost, res.PromptTokens, res.CompletionTokens, res.TotalTokens)
+	return entry, ok
 }
 
-func buildPoll(chatID int64, q questions.Question, lang languageOption, topic string, result *generator.Result) *tgbotapi.SendPollConfig {
-	if len(q.Options) < 2 {
-		return nil
+func buildQuestionHTML(q questions.Question, lang languageOption) string {
+	var sb strings.Builder
+	sb.WriteString("<b>")
+	sb.WriteString(html.EscapeString(lang.TopicLabel))
+	sb.WriteString(":</b> ")
+	sb.WriteString(html.EscapeString(q.Topic))
+	if q.Level != "" {
+		sb.WriteString(" (")
+		sb.WriteString(html.EscapeString(q.Level))
+		sb.WriteString(")")
 	}
+	sb.WriteString("<br><br>")
+	sb.WriteString(html.EscapeString(q.Prompt))
+	sb.WriteString("<br><br>")
+	for idx, opt := range q.Options {
+		sb.WriteString(fmt.Sprintf("<b>%s.</b> %s<br>", optionLetter(idx), html.EscapeString(opt)))
+	}
+	sb.WriteString("<br>")
+	sb.WriteString(html.EscapeString(lang.RevealInstruction))
+	return sb.String()
+}
 
-	question := buildPollQuestion(q, lang)
-	options := make([]string, len(q.Options))
-	correctIdx := -1
-	for i, opt := range q.Options {
-		trimmed := strings.TrimSpace(opt)
-		if correctIdx == -1 && trimmed == strings.TrimSpace(q.Answer) {
-			correctIdx = i
+func buildOptionsKeyboard(q questions.Question) tgbotapi.InlineKeyboardMarkup {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, (len(q.Options)+1)/2)
+	for i := 0; i < len(q.Options); i += 2 {
+		row := []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData(optionLetter(i), fmt.Sprintf("%s%d", callbackAnswerPrefix, i)),
 		}
-		options[i] = truncateRunes(trimmed, pollOptionMaxLen)
-	}
-
-	if correctIdx == -1 {
-		truncatedAnswer := truncateRunes(strings.TrimSpace(q.Answer), pollOptionMaxLen)
-		for i, opt := range options {
-			if opt == truncatedAnswer {
-				correctIdx = i
-				break
-			}
+		if j := i + 1; j < len(q.Options) {
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(optionLetter(j), fmt.Sprintf("%s%d", callbackAnswerPrefix, j)))
 		}
+		rows = append(rows, row)
 	}
-	if correctIdx < 0 {
-		return nil
-	}
-
-	poll := tgbotapi.NewPoll(chatID, question, options...)
-	poll.Type = "quiz"
-	poll.IsAnonymous = false
-	poll.CorrectOptionID = int64(correctIdx)
-
-	explanation := buildPollExplanation(q, lang, result)
-	if explanation != "" {
-		poll.Explanation = explanation
-		poll.ExplanationParseMode = "MarkdownV2"
-	}
-
-	poll.ReplyMarkup = nextButtonMarkup(topic, lang)
-
-	return &poll
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-func buildPollQuestion(q questions.Question, lang languageOption) string {
-	header := q.Prompt
-	header = strings.TrimSpace(header)
-	if header == "" {
-		header = "Select the correct answer"
+func buildAnsweredHTML(baseHTML string, entry pendingQuestion, selectedIdx, correctIdx int) string {
+	var sb strings.Builder
+	sb.WriteString(baseHTML)
+	sb.WriteString("<br><br><b>")
+	if selectedIdx == correctIdx {
+		sb.WriteString(html.EscapeString(entry.Lang.CorrectFeedback))
+	} else {
+		sb.WriteString(html.EscapeString(entry.Lang.IncorrectFeedback))
+	}
+	sb.WriteString("</b><br>")
+
+	if selectedIdx >= 0 && selectedIdx < len(entry.Question.Options) {
+		sb.WriteString("<b>")
+		sb.WriteString(html.EscapeString(entry.Lang.YourAnswerLabel))
+		sb.WriteString(":</b> ")
+		sb.WriteString(html.EscapeString(entry.Question.Options[selectedIdx]))
+		sb.WriteString("<br>")
 	}
 
-	prefix := strings.TrimSpace(q.Topic)
-	level := strings.TrimSpace(q.Level)
-	if prefix != "" && level != "" {
-		prefix = fmt.Sprintf("%s (%s)", prefix, level)
-	} else if level != "" {
-		prefix = level
-	}
+	correctText := entry.Question.Answer
+	sb.WriteString("<span class=\"tg-spoiler\"><b>")
+	sb.WriteString(html.EscapeString(entry.Lang.CorrectAnswerLabel))
+	sb.WriteString(":</b> ")
+	sb.WriteString(html.EscapeString(correctText))
 
-	if prefix != "" {
-		header = fmt.Sprintf("%s: %s — %s", lang.TopicLabel, prefix, header)
+	if strings.TrimSpace(entry.Question.Explanation) != "" {
+		sb.WriteString("<br><b>")
+		sb.WriteString(html.EscapeString(entry.Lang.WhyLabel))
+		sb.WriteString(":</b> ")
+		sb.WriteString(htmlize(entry.Question.Explanation))
 	}
+	sb.WriteString("</span>")
 
-	return truncateRunes(header, pollQuestionMaxLen)
-}
-
-func buildPollExplanation(q questions.Question, lang languageOption, result *generator.Result) string {
-	content := []string{
-		lang.CorrectAnswerLabel + ": " + q.Answer,
-	}
-	if strings.TrimSpace(q.Explanation) != "" {
-		content = append(content, lang.WhyLabel+": "+q.Explanation)
-	}
-
-	if result != nil && (result.PromptTokens > 0 || result.CompletionTokens > 0) {
-		content = append(content, fmt.Sprintf("Tokens: %d/%d/%d", result.PromptTokens, result.CompletionTokens, result.TotalTokens))
-		if result.CostUSD > 0 {
-			content = append(content, fmt.Sprintf("Cost: $%.4f", result.CostUSD))
+	if entry.Result.PromptTokens > 0 || entry.Result.CompletionTokens > 0 {
+		sb.WriteString("<br><br><b>")
+		sb.WriteString(html.EscapeString(entry.Lang.TokensLabel))
+		sb.WriteString(":</b> ")
+		sb.WriteString(fmt.Sprintf("%d/%d/%d", entry.Result.PromptTokens, entry.Result.CompletionTokens, entry.Result.TotalTokens))
+		if entry.Result.CostUSD > 0 {
+			sb.WriteString("<br><b>")
+			sb.WriteString(html.EscapeString(entry.Lang.CostLabel))
+			sb.WriteString(":</b> $")
+			sb.WriteString(fmt.Sprintf("%.4f", entry.Result.CostUSD))
 		}
 	}
 
-	body := escapeMarkdownV2(strings.Join(content, "\n"))
-	if body == "" {
-		return ""
-	}
-
-	if utf8.RuneCountInString(body) > pollExplanationMaxLen-4 {
-		body = truncateRunes(body, pollExplanationMaxLen-4)
-	}
-
-	return "||" + body + "||"
+	return sb.String()
 }
 
-func truncateRunes(s string, limit int) string {
-	if limit <= 0 {
-		return ""
+func htmlize(text string) string {
+	escaped := html.EscapeString(text)
+	return strings.ReplaceAll(escaped, "\n", "<br>")
+}
+
+func findCorrectOptionIndex(q questions.Question) int {
+	answer := strings.TrimSpace(q.Answer)
+	for idx, opt := range q.Options {
+		if strings.TrimSpace(opt) == answer {
+			return idx
+		}
 	}
-	if utf8.RuneCountInString(s) <= limit {
-		return s
-	}
-	runes := []rune(s)
-	runes = runes[:limit]
-	// Avoid leaving a dangling escape character that would break MarkdownV2.
-	if len(runes) > 0 && runes[len(runes)-1] == '\\' {
-		runes = runes[:len(runes)-1]
-	}
-	return string(runes)
+	return -1
 }
 
 func optionLetter(idx int) string {
 	return string(rune('A' + idx))
-}
-
-func escapeMarkdownV2(input string) string {
-	replacer := strings.NewReplacer(
-		`_`, `\_`,
-		`*`, `\*`,
-		`[`, `\[`,
-		`]`, `\]`,
-		`(`, `\(`,
-		`)`, `\)`,
-		`~`, `\~`,
-		`>`, `\>`,
-		`#`, `\#`,
-		`+`, `\+`,
-		`-`, `\-`,
-		`=`, `\=`,
-		`|`, `\|`,
-		`{`, `\{`,
-		`}`, `\}`,
-		`.`, `\.`,
-		`!`, `\!`,
-	)
-	return replacer.Replace(input)
 }
 
 func helpMessage(interval time.Duration) string {
