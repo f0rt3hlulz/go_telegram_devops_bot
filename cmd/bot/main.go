@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -13,10 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"net/http"
-
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"go_devops_telegram_bot/internal/generator"
 	"go_devops_telegram_bot/internal/questions"
 )
 
@@ -27,13 +27,17 @@ const (
 	defaultQuietEndHour    = 8
 	defaultQuietTimezone   = "Asia/Dubai"
 
-	envBotToken        = "TELEGRAM_BOT_TOKEN"
-	envIntervalMinutes = "QUESTION_INTERVAL_MINUTES"
-	envDebug           = "TELEGRAM_BOT_DEBUG"
-	envHealthAddr      = "HEALTH_ADDR"
-	envQuietStartHour  = "QUIET_HOURS_START"
-	envQuietEndHour    = "QUIET_HOURS_END"
-	envQuietTimezone   = "QUIET_HOURS_TZ"
+	envBotToken          = "TELEGRAM_BOT_TOKEN"
+	envOpenAIAPIKey      = "OPENAI_API_KEY"
+	envOpenAIBaseURL     = "OPENAI_BASE_URL"
+	envOpenAIModel       = "OPENAI_MODEL"
+	envOpenAITemperature = "OPENAI_TEMPERATURE"
+	envIntervalMinutes   = "QUESTION_INTERVAL_MINUTES"
+	envDebug             = "TELEGRAM_BOT_DEBUG"
+	envHealthAddr        = "HEALTH_ADDR"
+	envQuietStartHour    = "QUIET_HOURS_START"
+	envQuietEndHour      = "QUIET_HOURS_END"
+	envQuietTimezone     = "QUIET_HOURS_TZ"
 )
 
 func main() {
@@ -56,8 +60,9 @@ func main() {
 	}
 
 	quiet := loadQuietHours()
+	qGenerator := loadQuestionGenerator()
 
-	bot := NewQuestionBot(botAPI, questions.DefaultBank(), interval, quiet)
+	bot := NewQuestionBot(botAPI, questions.DefaultBank(), interval, qGenerator, quiet)
 	log.Printf("bot %s initialized; interval %s", botAPI.Self.UserName, interval)
 
 	if addr := healthAddr(); addr != "" {
@@ -98,11 +103,42 @@ func loadInterval() time.Duration {
 	return time.Duration(value) * time.Minute
 }
 
+func loadQuestionGenerator() questionGenerator {
+	apiKey := strings.TrimSpace(os.Getenv(envOpenAIAPIKey))
+	if apiKey == "" {
+		return nil
+	}
+
+	cfg := generator.Config{
+		APIKey:  apiKey,
+		BaseURL: strings.TrimSpace(os.Getenv(envOpenAIBaseURL)),
+		Model:   strings.TrimSpace(os.Getenv(envOpenAIModel)),
+	}
+
+	if rawTemp := strings.TrimSpace(os.Getenv(envOpenAITemperature)); rawTemp != "" {
+		if temp, err := strconv.ParseFloat(rawTemp, 32); err == nil {
+			cfg.Temperature = float32(temp)
+		} else {
+			log.Printf("invalid %s=%q, using default temperature", envOpenAITemperature, rawTemp)
+		}
+	}
+
+	gen, err := generator.NewOpenAIGenerator(cfg)
+	if err != nil {
+		log.Printf("openai generator disabled: %v", err)
+		return nil
+	}
+
+	log.Printf("openai generator enabled with model %s (base %s)", cfg.Model, cfg.BaseURL)
+	return gen
+}
+
 // QuestionBot handles Telegram updates and broadcasts interview questions.
 type QuestionBot struct {
 	api        *tgbotapi.BotAPI
 	bank       *questions.Bank
 	interval   time.Duration
+	generator  questionGenerator
 	subscriber struct {
 		mu    sync.RWMutex
 		chats map[int64]struct{}
@@ -114,13 +150,18 @@ type QuestionBot struct {
 	quiet quietWindow
 }
 
+type questionGenerator interface {
+	Generate(ctx context.Context, topic string) (questions.Question, error)
+}
+
 // NewQuestionBot constructs a bot instance.
-func NewQuestionBot(api *tgbotapi.BotAPI, bank *questions.Bank, interval time.Duration, quiet quietWindow) *QuestionBot {
+func NewQuestionBot(api *tgbotapi.BotAPI, bank *questions.Bank, interval time.Duration, generator questionGenerator, quiet quietWindow) *QuestionBot {
 	b := &QuestionBot{
-		api:      api,
-		bank:     bank,
-		interval: interval,
-		quiet:    quiet,
+		api:       api,
+		bank:      bank,
+		interval:  interval,
+		generator: generator,
+		quiet:     quiet,
 	}
 	b.subscriber.chats = make(map[int64]struct{})
 	b.history.perChat = make(map[int64]map[int]struct{})
@@ -198,12 +239,32 @@ func (b *QuestionBot) handleMessage(msg *tgbotapi.Message) {
 }
 
 func (b *QuestionBot) sendQuestion(chatID int64, topic string) error {
+	if b.generator != nil {
+		q, err := b.generator.Generate(context.Background(), topic)
+		if err == nil {
+			return b.deliverQuestion(chatID, q)
+		}
+		log.Printf("OpenAI generator failed, falling back to local bank: %v", err)
+	}
+	return b.sendFromBank(chatID, topic)
+}
+
+func (b *QuestionBot) sendFromBank(chatID int64, topic string) error {
 	exclude := b.historySnapshot(chatID)
 	q, idx, reset, err := b.bank.RandomWithExclusion(topic, exclude)
 	if err != nil {
 		return err
 	}
 
+	if err := b.deliverQuestion(chatID, q); err != nil {
+		return err
+	}
+
+	b.rememberQuestion(chatID, idx, reset)
+	return nil
+}
+
+func (b *QuestionBot) deliverQuestion(chatID int64, q questions.Question) error {
 	body := buildQuestionMessage(q)
 	msg := tgbotapi.NewMessage(chatID, body)
 	msg.DisableWebPagePreview = true
@@ -212,15 +273,16 @@ func (b *QuestionBot) sendQuestion(chatID int64, topic string) error {
 		return err
 	}
 
-	b.rememberQuestion(chatID, idx, reset)
-
 	answer := buildSpoilerAnswer(q)
 	answerMsg := tgbotapi.NewMessage(chatID, answer)
 	answerMsg.ParseMode = "MarkdownV2"
 	answerMsg.DisableWebPagePreview = true
 
-	_, err = b.api.Send(answerMsg)
-	return err
+	if _, err := b.api.Send(answerMsg); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (b *QuestionBot) replyPlain(chatID int64, text string) {

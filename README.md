@@ -3,7 +3,7 @@
 Go-based Telegram bot that quizzes you with mid-to-senior DevOps interview questions. It supports an automatic schedule (every 30 minutes by default), on-demand questions, topic filtering, and spoiler-protected answers so you can self-assess.
 
 ## Features
-- Curated question bank across Ansible, Docker, Linux, Kubernetes, GitLab CI, Bash, Python, Nginx, HAProxy, Grafana, Prometheus, ELK, SQL, ClickHouse, and general DevOps practices.
+- Dynamic questions via OpenAI (set `OPENAI_API_KEY`) with automatic fallback to a curated on-disk bank covering Ansible, Docker, Linux, Kubernetes, GitLab CI, Bash, Python, Nginx, HAProxy, Grafana, Prometheus, ELK, SQL, ClickHouse, and general DevOps practices.
 - `/question` command for instant quizzes, optionally filtered by topic (e.g. `/question kubernetes`).
 - `/subscribe` (or `/start`) to opt-in to the automatic 30-minute rotation; `/unsubscribe` stops it.
 - Answers arrive as Telegram spoilers (`||text||`) to avoid accidental reveals.
@@ -17,7 +17,12 @@ Go-based Telegram bot that quizzes you with mid-to-senior DevOps interview quest
 
 ## Quick start
 ```bash
+cp .env.example .env  # optional helper file
 export TELEGRAM_BOT_TOKEN="<your-telegram-token>"
+# Optional: enable OpenAI generation (falls back to local bank if unavailable)
+# export OPENAI_API_KEY="sk-..."
+# export OPENAI_MODEL="gpt-5"
+# export OPENAI_TEMPERATURE=0.6
 # Optional: change the 30 minute cadence
 # export QUESTION_INTERVAL_MINUTES=45
 # Optional: change or disable the health endpoint
@@ -49,6 +54,7 @@ go build -o devops-bot ./cmd/bot
 - **Integrate an external generator**: replace `questions.DefaultBank()` in `cmd/bot/main.go` with a provider that calls an API such as OpenAI, while preserving the `Question` struct contract.
 - **Health endpoint**: override `HEALTH_ADDR` (default `:8080`); set to `disabled` or `-` to turn it off.
 - **Quiet hours**: override `QUIET_HOURS_START`, `QUIET_HOURS_END`, and `QUIET_HOURS_TZ` (defaults 23–08 in Asia/Dubai). Set either start or end to `disabled`/`-` to turn the feature off.
+- **OpenAI generation**: set `OPENAI_API_KEY` (required). Optional: `OPENAI_MODEL` (default `gpt-5`), `OPENAI_BASE_URL`, and `OPENAI_TEMPERATURE` (default 0.6). If the API call fails, the bot automatically uses the local bank.
 
 ## Container image
 Build and run via Docker:
@@ -61,6 +67,8 @@ docker run -d \
   -e QUIET_HOURS_START=23 \
   -e QUIET_HOURS_END=8 \
   -e QUIET_HOURS_TZ="Asia/Dubai" \
+  -e OPENAI_API_KEY="sk-..." \
+  -e OPENAI_MODEL="gpt-5" \
   -p 8080:8080 \
   devops-telegram-bot
 ```
