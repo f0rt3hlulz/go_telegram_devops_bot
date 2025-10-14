@@ -21,7 +21,7 @@ const (
 - Always produce four answer options with only one correct answer. Make the distractors plausible but clearly wrong for an expert.
 - Answers must reveal why they are correct in a concise explanation.`
 	defaultModel       = "gpt-5"
-	defaultTemperature = 0.6
+	defaultTemperature = 1.0
 	requestTimeout     = 45 * time.Second
 )
 

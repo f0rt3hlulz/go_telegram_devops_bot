@@ -23,7 +23,7 @@ export TELEGRAM_BOT_TOKEN="<your-telegram-token>"
 # Optional: enable OpenAI generation (falls back to local bank if unavailable)
 # export OPENAI_API_KEY="sk-..."
 # export OPENAI_MODEL="gpt-5"
-# export OPENAI_TEMPERATURE=0.6
+# export OPENAI_TEMPERATURE=1
 # Optional: change the 30 minute cadence
 # export QUESTION_INTERVAL_MINUTES=45
 # Optional: change or disable the health endpoint
@@ -55,7 +55,7 @@ go build -o devops-bot ./cmd/bot
 - **Integrate an external generator**: replace `questions.DefaultBank()` in `cmd/bot/main.go` with a provider that calls an API such as OpenAI, while preserving the `Question` struct contract.
 - **Health endpoint**: override `HEALTH_ADDR` (default `:8080`); set to `disabled` or `-` to turn it off.
 - **Quiet hours**: override `QUIET_HOURS_START`, `QUIET_HOURS_END`, and `QUIET_HOURS_TZ` (defaults 23–08 in Asia/Dubai). Set either start or end to `disabled`/`-` to turn the feature off.
-- **OpenAI generation**: set `OPENAI_API_KEY` (required). Optional: `OPENAI_MODEL` (default `gpt-5`), `OPENAI_BASE_URL`, and `OPENAI_TEMPERATURE` (default 0.6). If the API call fails, the bot automatically uses the local bank.
+- **OpenAI generation**: set `OPENAI_API_KEY` (required). Optional: `OPENAI_MODEL` (default `gpt-5`), `OPENAI_BASE_URL`, and `OPENAI_TEMPERATURE` (default 1; some GPT-5 variants only accept the default). If the API call fails, the bot automatically uses the local bank.
 
 ## Container image
 Build and run via Docker:
