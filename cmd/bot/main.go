@@ -49,12 +49,13 @@ type languageOption struct {
 	Code                string
 	Name                string
 	NextButton          string
-	NeedAnother         string
 	TopicLabel          string
-	RevealInstruction   string
 	CorrectAnswerLabel  string
 	WhyLabel            string
-	LocalFallbackNotice string
+	GeneratingMessage   string
+	ReadyTemplate       string
+	ReadyTemplateNoCost string
+	GenerationFailed    string
 }
 
 var languageOptions = map[string]languageOption{
@@ -62,23 +63,25 @@ var languageOptions = map[string]languageOption{
 		Code:                "en",
 		Name:                "English",
 		NextButton:          "Next question",
-		NeedAnother:         "Need another question?",
 		TopicLabel:          "Topic",
-		RevealInstruction:   "Answer hidden below. Tap the spoiler to reveal.",
 		CorrectAnswerLabel:  "Correct answer",
 		WhyLabel:            "Why",
-		LocalFallbackNotice: "Served from local question bank (no API cost).",
+		GeneratingMessage:   "⚙️ Generating a new question...",
+		ReadyTemplate:       "✅ Question ready!\nTokens — prompt: %d, completion: %d, total: %d.\nApprox cost: $%.4f.\nVote in the poll below.",
+		ReadyTemplateNoCost: "✅ Question ready!\nTokens — prompt: %d, completion: %d, total: %d.\nVote in the poll below.",
+		GenerationFailed:    "❌ Couldn't generate a question right now. Please try again in a moment.",
 	},
 	"ru": {
 		Code:                "ru",
 		Name:                "Russian",
 		NextButton:          "Следующий вопрос",
-		NeedAnother:         "Нужен следующий вопрос?",
 		TopicLabel:          "Тема",
-		RevealInstruction:   "Ответ скрыт ниже. Нажмите на спойлер, чтобы открыть.",
 		CorrectAnswerLabel:  "Правильный ответ",
 		WhyLabel:            "Почему",
-		LocalFallbackNotice: "Вопрос взят из локального банка (без затрат на API).",
+		GeneratingMessage:   "⚙️ Генерирую новый вопрос...",
+		ReadyTemplate:       "✅ Вопрос готов!\nТокены — prompt: %d, completion: %d, всего: %d.\nПримерная стоимость: $%.4f.\nОцени варианты в опросе ниже.",
+		ReadyTemplateNoCost: "✅ Вопрос готов!\nТокены — prompt: %d, completion: %d, всего: %d.\nОцени варианты в опросе ниже.",
+		GenerationFailed:    "❌ Не удалось сгенерировать вопрос. Попробуйте чуть позже.",
 	},
 }
 
@@ -201,10 +204,6 @@ type QuestionBot struct {
 		mu    sync.RWMutex
 		chats map[int64]struct{}
 	}
-	history struct {
-		mu      sync.RWMutex
-		perChat map[int64]map[int]struct{}
-	}
 	language struct {
 		mu      sync.RWMutex
 		perChat map[int64]string
@@ -227,7 +226,6 @@ func NewQuestionBot(api *tgbotapi.BotAPI, bank *questions.Bank, interval time.Du
 		quiet:     quiet,
 	}
 	b.subscriber.chats = make(map[int64]struct{})
-	b.history.perChat = make(map[int64]map[int]struct{})
 	b.language.perChat = make(map[int64]string)
 	return b
 }
@@ -283,7 +281,7 @@ func (b *QuestionBot) handleCommand(msg *tgbotapi.Message) {
 	case "question":
 		topic := strings.TrimSpace(msg.CommandArguments())
 		if err := b.sendQuestion(msg.Chat.ID, topic); err != nil {
-			b.replyPlain(msg.Chat.ID, fmt.Sprintf("Could not fetch a question: %v", err))
+			log.Printf("/question failed for chat %d: %v", msg.Chat.ID, err)
 		}
 	case "topics":
 		topics := b.bank.Topics()
@@ -321,7 +319,7 @@ func (b *QuestionBot) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	if err := b.sendQuestion(msg.Chat.ID, text); err != nil {
-		b.replyPlain(msg.Chat.ID, fmt.Sprintf("No topic match for %q. Use /topics to see options or /question for random.", text))
+		log.Printf("direct question request failed for chat %d: %v", msg.Chat.ID, err)
 	}
 }
 
@@ -350,110 +348,73 @@ func (b *QuestionBot) handleCallback(query *tgbotapi.CallbackQuery) {
 	}
 
 	if err := b.sendQuestion(query.Message.Chat.ID, topic); err != nil {
-		b.replyPlain(query.Message.Chat.ID, fmt.Sprintf("Could not fetch the next question: %v", err))
+		log.Printf("callback question failed for chat %d: %v", query.Message.Chat.ID, err)
 	}
 }
 
 func (b *QuestionBot) sendQuestion(chatID int64, topic string) error {
 	topic = strings.TrimSpace(topic)
+	lang := b.languageForChat(chatID)
+
+	if b.generator == nil {
+		errMsg := "OpenAI generator is not configured. Set OPENAI_API_KEY."
+		if lang.Code == "ru" {
+			errMsg = "Генератор OpenAI не настроен. Установите переменную OPENAI_API_KEY."
+		}
+		b.replyPlain(chatID, errMsg)
+		return errors.New("openai generator unavailable")
+	}
+
 	b.sendChatAction(chatID)
 
-	lang := b.languageForChat(chatID)
-	var generated *generator.Result
-	if b.generator != nil {
-		res, err := b.generator.Generate(context.Background(), topic, lang.Name)
-		if err == nil {
-			if err := b.deliverQuestion(chatID, res.Question, lang); err == nil {
-				generated = &res
-			} else {
-				log.Printf("deliver generated question failed: %v", err)
-			}
-		} else {
-			log.Printf("OpenAI generator failed, falling back to local bank: %v", err)
-		}
-	}
-	if generated == nil {
-		if err := b.sendFromBank(chatID, topic, lang); err != nil {
-			return err
-		}
-	}
+	statusMsg, statusErr := b.api.Send(tgbotapi.NewMessage(chatID, lang.GeneratingMessage))
 
-	b.sendReceipt(chatID, topic, generated, lang)
-	return nil
-}
-
-func (b *QuestionBot) sendFromBank(chatID int64, topic string, lang languageOption) error {
-	exclude := b.historySnapshot(chatID)
-	q, idx, reset, err := b.bank.RandomWithExclusion(topic, exclude)
+	res, err := b.generator.Generate(context.Background(), topic, lang.Name)
 	if err != nil {
+		log.Printf("generate question failed: %v", err)
+		if statusErr == nil {
+			_, _ = b.api.Send(tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, lang.GenerationFailed))
+		} else {
+			b.replyPlain(chatID, lang.GenerationFailed)
+		}
 		return err
 	}
 
-	if err := b.deliverQuestion(chatID, q, lang); err != nil {
+	if err := b.deliverPoll(chatID, res.Question, lang, topic, &res); err != nil {
+		log.Printf("send poll failed: %v", err)
+		if statusErr == nil {
+			_, _ = b.api.Send(tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, lang.GenerationFailed))
+		} else {
+			b.replyPlain(chatID, lang.GenerationFailed)
+		}
 		return err
 	}
 
-	b.rememberQuestion(chatID, idx, reset)
+	b.stats.record(&res)
+
+	if statusErr == nil {
+		readyText := formatReadyMessage(lang, &res)
+		_, _ = b.api.Send(tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, readyText))
+	}
+
 	return nil
 }
 
-func (b *QuestionBot) deliverQuestion(chatID int64, q questions.Question, lang languageOption) error {
-	if poll := buildPoll(chatID, q, lang); poll != nil {
-		if err := b.sendQuestionText(chatID, q, lang); err != nil {
-			return err
-		}
-
-		if _, err := b.api.Send(poll); err == nil {
-			if err := b.sendAnswerMessage(chatID, q, lang, true); err != nil {
-				return err
-			}
-			return nil
-		}
-
-		log.Printf("send poll failed for chat %d; falling back to text message", chatID)
-		// fall through to fallback path (question already sent, answer missing)
-		if err := b.sendAnswerMessage(chatID, q, lang, true); err == nil {
-			return nil
-		}
+func (b *QuestionBot) deliverPoll(chatID int64, q questions.Question, lang languageOption, topic string, res *generator.Result) error {
+	poll := buildPoll(chatID, q, lang, topic, res)
+	if poll == nil {
+		return errors.New("unable to build poll")
 	}
 
-	return b.sendFallbackMessage(chatID, q, lang)
-}
-
-func (b *QuestionBot) sendFallbackMessage(chatID int64, q questions.Question, lang languageOption) error {
-	if err := b.sendQuestionText(chatID, q, lang); err != nil {
-		return err
-	}
-	if err := b.sendAnswerMessage(chatID, q, lang, true); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (b *QuestionBot) sendQuestionText(chatID int64, q questions.Question, lang languageOption) error {
-	body := buildQuestionMessage(q, lang)
-	msg := tgbotapi.NewMessage(chatID, body)
-	msg.DisableWebPagePreview = true
-
-	if _, err := b.api.Send(msg); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (b *QuestionBot) sendAnswerMessage(chatID int64, q questions.Question, lang languageOption, logAnswer bool) error {
-	answer := buildSpoilerAnswer(q, lang)
-	answerMsg := tgbotapi.NewMessage(chatID, answer)
-	answerMsg.ParseMode = "MarkdownV2"
-	answerMsg.DisableWebPagePreview = true
-
-	if _, err := b.api.Send(answerMsg); err != nil {
+	if _, err := b.api.Send(poll); err != nil {
 		return err
 	}
 
-	if logAnswer {
-		log.Printf("answer sent to chat %d | topic=%s | answer=%s", chatID, q.Topic, q.Answer)
+	cost := 0.0
+	if res != nil {
+		cost = res.CostUSD
 	}
+	log.Printf("question sent to chat %d | topic=%s | answer=%s | cost=$%.4f", chatID, q.Topic, q.Answer, cost)
 	return nil
 }
 
@@ -541,40 +502,6 @@ const (
 	callbackNextPrefix = "next|"
 	maxCallbackTopic   = 48
 )
-
-func (b *QuestionBot) sendReceipt(chatID int64, topic string, res *generator.Result, lang languageOption) {
-	b.stats.record(res)
-
-	var sb strings.Builder
-	if res != nil {
-		model := strings.TrimSpace(res.Model)
-		if model == "" {
-			model = "OpenAI"
-		}
-		sb.WriteString(fmt.Sprintf("%s tokens — prompt: %d, completion: %d, total: %d\nApprox cost: $%.4f",
-			model, res.PromptTokens, res.CompletionTokens, res.TotalTokens, res.CostUSD))
-		if res.CostUSD == 0 {
-			sb.WriteString("\n(cost estimate based on configured rates)")
-		}
-		if strings.TrimSpace(res.Language) != "" {
-			sb.WriteString(fmt.Sprintf("\nLanguage: %s", res.Language))
-		}
-	} else {
-		sb.WriteString(lang.LocalFallbackNotice)
-		if lang.Code != defaultLanguageCode {
-			sb.WriteString(fmt.Sprintf("\n(Note: fallback question remains in English while %s content is unavailable.)", lang.Name))
-		}
-	}
-	sb.WriteString("\n\n")
-	sb.WriteString(lang.NeedAnother)
-
-	msg := tgbotapi.NewMessage(chatID, sb.String())
-	msg.DisableWebPagePreview = true
-	msg.ReplyMarkup = nextButtonMarkup(topic, lang)
-	if _, err := b.api.Send(msg); err != nil {
-		log.Printf("send receipt failed: %v", err)
-	}
-}
 
 func nextButtonMarkup(topic string, lang languageOption) tgbotapi.InlineKeyboardMarkup {
 	data := callbackNextPrefix + encodeTopicForCallback(topic)
@@ -720,7 +647,19 @@ func (b *QuestionBot) sendUsageStats(chatID int64) {
 	}
 }
 
-func buildPoll(chatID int64, q questions.Question, lang languageOption) *tgbotapi.SendPollConfig {
+func formatReadyMessage(lang languageOption, res *generator.Result) string {
+	if res == nil {
+		return lang.GenerationFailed
+	}
+
+	if res.CostUSD > 0 {
+		return fmt.Sprintf(lang.ReadyTemplate, res.PromptTokens, res.CompletionTokens, res.TotalTokens, res.CostUSD)
+	}
+
+	return fmt.Sprintf(lang.ReadyTemplateNoCost, res.PromptTokens, res.CompletionTokens, res.TotalTokens)
+}
+
+func buildPoll(chatID int64, q questions.Question, lang languageOption, topic string, result *generator.Result) *tgbotapi.SendPollConfig {
 	if len(q.Options) < 2 {
 		return nil
 	}
@@ -754,11 +693,13 @@ func buildPoll(chatID int64, q questions.Question, lang languageOption) *tgbotap
 	poll.IsAnonymous = false
 	poll.CorrectOptionID = int64(correctIdx)
 
-	explanation := buildPollExplanation(q, lang)
+	explanation := buildPollExplanation(q, lang, result)
 	if explanation != "" {
 		poll.Explanation = explanation
 		poll.ExplanationParseMode = "MarkdownV2"
 	}
+
+	poll.ReplyMarkup = nextButtonMarkup(topic, lang)
 
 	return &poll
 }
@@ -785,12 +726,19 @@ func buildPollQuestion(q questions.Question, lang languageOption) string {
 	return truncateRunes(header, pollQuestionMaxLen)
 }
 
-func buildPollExplanation(q questions.Question, lang languageOption) string {
+func buildPollExplanation(q questions.Question, lang languageOption, result *generator.Result) string {
 	content := []string{
 		lang.CorrectAnswerLabel + ": " + q.Answer,
 	}
 	if strings.TrimSpace(q.Explanation) != "" {
 		content = append(content, lang.WhyLabel+": "+q.Explanation)
+	}
+
+	if result != nil && (result.PromptTokens > 0 || result.CompletionTokens > 0) {
+		content = append(content, fmt.Sprintf("Tokens: %d/%d/%d", result.PromptTokens, result.CompletionTokens, result.TotalTokens))
+		if result.CostUSD > 0 {
+			content = append(content, fmt.Sprintf("Cost: $%.4f", result.CostUSD))
+		}
 	}
 
 	body := escapeMarkdownV2(strings.Join(content, "\n"))
@@ -819,41 +767,6 @@ func truncateRunes(s string, limit int) string {
 		runes = runes[:len(runes)-1]
 	}
 	return string(runes)
-}
-
-func buildQuestionMessage(q questions.Question, lang languageOption) string {
-	var sb strings.Builder
-	sb.WriteString(lang.TopicLabel)
-	sb.WriteString(": ")
-	sb.WriteString(q.Topic)
-	if q.Level != "" {
-		sb.WriteString(" (")
-		sb.WriteString(q.Level)
-		sb.WriteString(")")
-	}
-	sb.WriteString("\n\n")
-	sb.WriteString(q.Prompt)
-	sb.WriteString("\n\n")
-
-	for idx, opt := range q.Options {
-		sb.WriteString(fmt.Sprintf("%s. %s\n", optionLetter(idx), opt))
-	}
-
-	sb.WriteString("\n")
-	sb.WriteString(lang.RevealInstruction)
-	return sb.String()
-}
-
-func buildSpoilerAnswer(q questions.Question, lang languageOption) string {
-	details := []string{
-		lang.CorrectAnswerLabel + ": " + q.Answer,
-	}
-	if strings.TrimSpace(q.Explanation) != "" {
-		details = append(details, lang.WhyLabel+": "+q.Explanation)
-	}
-
-	body := strings.Join(details, "\n")
-	return fmt.Sprintf("||%s||", escapeMarkdownV2(body))
 }
 
 func optionLetter(idx int) string {
@@ -894,50 +807,6 @@ func helpMessage(interval time.Duration) string {
 		"Use /stats to see token usage and cost summaries since startup.",
 		"Use /language to change the language used for generated questions.",
 	}, "\n")
-}
-
-func (b *QuestionBot) historySnapshot(chatID int64) map[int]struct{} {
-	b.history.mu.RLock()
-	defer b.history.mu.RUnlock()
-
-	if len(b.history.perChat) == 0 {
-		return nil
-	}
-
-	stored, ok := b.history.perChat[chatID]
-	if !ok || len(stored) == 0 {
-		return nil
-	}
-
-	copy := make(map[int]struct{}, len(stored))
-	for idx := range stored {
-		copy[idx] = struct{}{}
-	}
-	return copy
-}
-
-func (b *QuestionBot) rememberQuestion(chatID int64, idx int, reset bool) {
-	b.history.mu.Lock()
-	defer b.history.mu.Unlock()
-
-	if b.history.perChat == nil {
-		b.history.perChat = make(map[int64]map[int]struct{})
-	}
-
-	if reset {
-		b.history.perChat[chatID] = map[int]struct{}{
-			idx: {},
-		}
-		return
-	}
-
-	hist := b.history.perChat[chatID]
-	if hist == nil {
-		hist = make(map[int]struct{})
-		b.history.perChat[chatID] = hist
-	}
-
-	hist[idx] = struct{}{}
 }
 
 func serveHealth(ctx context.Context, addr string) {

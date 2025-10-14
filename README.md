@@ -7,9 +7,9 @@ Go-based Telegram bot that quizzes you with mid-to-senior DevOps interview quest
 - Inline "Next question" button to queue a fresh quiz without typing commands.
 - Token usage and cost estimates per generated question, plus `/stats` to see totals since startup.
 - Telegram typing indicator while questions are being generated so you can see progress.
-- Per-chat language selection (`/language`) so questions and explanations arrive in the language you’re practising.
+- Per-chat language selection (`/language`) for English and Russian delivery.
 - GPT-5 explanations read like mini-lessons with step-by-step reasoning and practical takeaways for deeper mastery.
-- Dynamic questions via OpenAI (set `OPENAI_API_KEY`) with automatic fallback to a curated on-disk bank covering Ansible, Docker, Linux, Kubernetes, GitLab CI, Bash, Python, Nginx, HAProxy, Grafana, Prometheus, ELK, SQL, ClickHouse, and general DevOps practices.
+- Dynamic questions are always generated via OpenAI (set `OPENAI_API_KEY`) across Ansible, Docker, Linux, Kubernetes, GitLab CI, Bash, Python, Nginx, HAProxy, Grafana, Prometheus, ELK, SQL, ClickHouse, and general DevOps practices.
 - `/question` command for instant quizzes, optionally filtered by topic (e.g. `/question kubernetes`).
 - `/subscribe` (or `/start`) to opt-in to the automatic 30-minute rotation; `/unsubscribe` stops it.
 - Answers arrive as Telegram spoilers (`||text||`) to avoid accidental reveals.
@@ -67,7 +67,7 @@ go build -o devops-bot ./cmd/bot
 - **Integrate an external generator**: replace `questions.DefaultBank()` in `cmd/bot/main.go` with a provider that calls an API such as OpenAI, while preserving the `Question` struct contract.
 - **Health endpoint**: override `HEALTH_ADDR` (default `:8080`); set to `disabled` or `-` to turn it off.
 - **Quiet hours**: override `QUIET_HOURS_START`, `QUIET_HOURS_END`, and `QUIET_HOURS_TZ` (defaults 23–08 in Asia/Dubai). Set either start or end to `disabled`/`-` to turn the feature off.
-- **OpenAI generation**: set `OPENAI_API_KEY` (required). Optional: `OPENAI_MODEL` (default `gpt-5`), `OPENAI_BASE_URL`, and `OPENAI_TEMPERATURE` (default 1; some GPT-5 variants only accept the default). If the API call fails, the bot automatically uses the local bank.
+- **OpenAI generation**: set `OPENAI_API_KEY` (required). Optional: `OPENAI_MODEL` (default `gpt-5`), `OPENAI_BASE_URL`, and `OPENAI_TEMPERATURE` (default 1; some GPT-5 variants only accept the default). If the API call fails, the bot reports the error and no question is sent.
 - **Cost assumptions**: override `OPENAI_PROMPT_COST_PER_1K` and `OPENAI_COMPLETION_COST_PER_1K` (USD per 1K tokens) to keep the usage estimates aligned with your pricing.
 - **Per-chat language**: run `/language` in Telegram to see the supported set or `/language ru` (for example) to switch.
 
@@ -99,5 +99,5 @@ The Dockerfile provides:
 - Subscribers are tracked in-memory; restart the bot to reset subscriptions.
 - Keep your `.env` or environment variables out of version control to protect credentials.
 - The bot uses basic throttling between broadcasts to respect Telegram rate limits; adjust the 500ms pause if you serve many chats.
-- Each generated question is followed by a receipt message with token counts and cost; use `/stats` for totals.
-- If the OpenAI API is unavailable, the bot falls back to the built-in English bank and notes the fallback in chat, even if you selected another language.
+- Each generated question includes token counts and cost in the poll’s explanation; use `/stats` for totals.
+- If the OpenAI API is unavailable, the bot reports an error so you can retry once the service recovers.
