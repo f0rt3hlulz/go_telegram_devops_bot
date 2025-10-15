@@ -30,7 +30,7 @@ const (
 	defaultQuietStartHour  = 23
 	defaultQuietEndHour    = 8
 	defaultQuietTimezone   = "Asia/Dubai"
-	defaultLanguageCode    = "en"
+	defaultLanguageCode    = "ru"
 
 	envBotToken                  = "TELEGRAM_BOT_TOKEN"
 	envOpenAIAPIKey              = "OPENAI_API_KEY"
@@ -757,19 +757,17 @@ func buildQuestionHTML(q questions.Question, lang languageOption) string {
 		sb.WriteString(html.EscapeString(q.Level))
 		sb.WriteString(")")
 	}
-	sb.WriteString("
-
-")
+	sb.WriteString("\n\n")
 	sb.WriteString(html.EscapeString(q.Prompt))
-	sb.WriteString("
-
-")
+	sb.WriteString("\n\n")
 	for idx, opt := range q.Options {
-		sb.WriteString(fmt.Sprintf("<b>%s.</b> %s
-", optionLetter(idx), html.EscapeString(opt)))
+		sb.WriteString("<b>")
+		sb.WriteString(optionLetter(idx))
+		sb.WriteString(".</b> ")
+		sb.WriteString(html.EscapeString(opt))
+		sb.WriteString("\n")
 	}
-	sb.WriteString("
-")
+	sb.WriteString("\n")
 	sb.WriteString(html.EscapeString(lang.RevealInstruction))
 	return sb.String()
 }
@@ -791,35 +789,30 @@ func buildOptionsKeyboard(q questions.Question) tgbotapi.InlineKeyboardMarkup {
 func buildAnsweredHTML(baseHTML string, entry pendingQuestion, selectedIdx, correctIdx int) string {
 	var sb strings.Builder
 	sb.WriteString(baseHTML)
-	sb.WriteString("
-
-<b>")
+	sb.WriteString("\n\n<b>")
 	if selectedIdx == correctIdx {
 		sb.WriteString(html.EscapeString(entry.Lang.CorrectFeedback))
 	} else {
 		sb.WriteString(html.EscapeString(entry.Lang.IncorrectFeedback))
 	}
-	sb.WriteString("</b>
-")
+	sb.WriteString("</b>\n")
 
 	if selectedIdx >= 0 && selectedIdx < len(entry.Question.Options) {
 		sb.WriteString("<b>")
 		sb.WriteString(html.EscapeString(entry.Lang.YourAnswerLabel))
 		sb.WriteString(":</b> ")
 		sb.WriteString(html.EscapeString(entry.Question.Options[selectedIdx]))
-		sb.WriteString("
-")
+		sb.WriteString("\n")
 	}
 
 	correctText := entry.Question.Answer
-	sb.WriteString("<span class="tg-spoiler"><b>")
+	sb.WriteString("<span class=\"tg-spoiler\"><b>")
 	sb.WriteString(html.EscapeString(entry.Lang.CorrectAnswerLabel))
 	sb.WriteString(":</b> ")
 	sb.WriteString(html.EscapeString(correctText))
 
 	if strings.TrimSpace(entry.Question.Explanation) != "" {
-		sb.WriteString("
-<b>")
+		sb.WriteString("\n<b>")
 		sb.WriteString(html.EscapeString(entry.Lang.WhyLabel))
 		sb.WriteString(":</b> ")
 		sb.WriteString(htmlize(entry.Question.Explanation))
@@ -827,15 +820,12 @@ func buildAnsweredHTML(baseHTML string, entry pendingQuestion, selectedIdx, corr
 	sb.WriteString("</span>")
 
 	if entry.Result.PromptTokens > 0 || entry.Result.CompletionTokens > 0 {
-		sb.WriteString("
-
-<b>")
+		sb.WriteString("\n\n<b>")
 		sb.WriteString(html.EscapeString(entry.Lang.TokensLabel))
 		sb.WriteString(":</b> ")
 		sb.WriteString(fmt.Sprintf("%d/%d/%d", entry.Result.PromptTokens, entry.Result.CompletionTokens, entry.Result.TotalTokens))
 		if entry.Result.CostUSD > 0 {
-			sb.WriteString("
-<b>")
+			sb.WriteString("\n<b>")
 			sb.WriteString(html.EscapeString(entry.Lang.CostLabel))
 			sb.WriteString(":</b> $")
 			sb.WriteString(fmt.Sprintf("%.4f", entry.Result.CostUSD))
@@ -948,7 +938,9 @@ func loadQuietHours() quietWindow {
 	endRaw := strings.TrimSpace(os.Getenv(envQuietEndHour))
 
 	if disableQuiet(startRaw) || disableQuiet(endRaw) {
-		return quietWindow{}
+		window := quietWindow{}
+		log.Printf("quiet hours disabled; timezone defaults to system (%s)", time.Now().Location().String())
+		return window
 	}
 
 	start := defaultQuietStartHour
@@ -980,6 +972,10 @@ func loadQuietHours() quietWindow {
 		location = time.UTC
 	}
 
+	// Align the process-wide local timezone with the configured quiet hours timezone so that logs
+	// and other time helpers reflect the expected local wall clock.
+	time.Local = location
+
 	window := quietWindow{
 		enabled:  start != end,
 		start:    start,
@@ -987,7 +983,7 @@ func loadQuietHours() quietWindow {
 		location: location,
 	}
 
-	log.Printf("quiet hours configured: %s", window.describeRange())
+	log.Printf("quiet hours configured: %s (log timezone %s)", window.describeRange(), location.String())
 	return window
 }
 
