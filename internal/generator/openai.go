@@ -14,13 +14,13 @@ import (
 )
 
 const (
-	systemPrompt = `You are an experienced DevOps interviewer. Create challenging multiple-choice interview questions suitable for mid to senior engineers.
-- Ground every question in real-world tooling or practices (Ansible, Docker, Linux, Kubernetes, GitLab CI, Bash, Python, Nginx, HAProxy, Grafana, Prometheus, ELK, SQL, ClickHouse, and related DevOps topics).
-- Focus on depth: configuration gotchas, performance tuning, production incident handling, architecture choices, CI/CD troubleshooting, observability, etc.
-- Prefer topics named by the user when provided; otherwise rotate through the domains to keep variety.
-- Always produce four answer options with only one correct answer. Make the distractors plausible but clearly wrong for an expert.
-- Answers must reveal why they are correct in a concise explanation.
-- Explanations must teach: include actionable guidance, common pitfalls, and next steps for deeper mastery.`
+	systemPrompt = `You are an experienced DevOps interviewer. Produce multiple-choice questions aimed at mid-level engineers with occasional senior-depth follow-ups.
+- Ground each scenario in real-world tooling or practices (Ansible, Docker, Linux, Kubernetes, GitLab CI, Bash, Python, Nginx, HAProxy, Grafana, Prometheus, ELK, SQL, ClickHouse, cloud infra, observability, CI/CD, and related DevOps topics).
+- Balance fundamentals and troubleshooting: keep questions practical, avoiding ultra-niche vendor trivia.
+- Respect format limits: the problem statement must stay under 280 characters (≈3 short sentences), and each answer option must be self-contained and no more than 90 characters.
+- Always provide exactly four answer options with one correct answer; distractors must sound plausible yet be incorrect.
+- Explanations should teach in 2–3 concise sentences, calling out why the correct option works and why the others fail.
+- When the user names a topic, stay on it; otherwise rotate through domains for variety.`
 	defaultModel               = "gpt-5"
 	defaultTemperature         = 1.0
 	defaultPromptCostPer1K     = 0.01
@@ -171,9 +171,9 @@ func buildPrompt(topic, language string) string {
 	if lang == "" {
 		lang = "English"
 	}
-	template := `Produce a single new interview question grounded in the listed DevOps domains. The entire output must be written in %s. Structure the explanation as a mini lesson: start with a concise summary, then provide step-by-step reasoning, and finish with bullet-point practical takeaways. Respond strictly as JSON with keys: topic, level, prompt, options (array of 4 strings), answer (must match one option exactly), explanation.`
+	template := `Produce one DevOps interview question. Write everything in %s. Keep the prompt under 280 characters (no more than three short sentences). Provide exactly four answer options, each at most 90 characters and self-contained. Add a 2–3 sentence explanation that highlights why the correct answer works and why the others do not. Respond strictly as JSON with keys: topic, level, prompt, options (array of 4 strings), answer (must match one option exactly), explanation.`
 	if topic != "" {
-		template = `Produce a single new interview question focused on %q. The entire output must be written in %s. Structure the explanation as a mini lesson: start with a concise summary, then provide step-by-step reasoning, and finish with bullet-point practical takeaways. Respond strictly as JSON with keys: topic, level, prompt, options (array of 4 strings), answer (must match one option exactly), explanation.`
+		template = `Produce one DevOps interview question focused on %q. Write everything in %s. Keep the prompt under 280 characters (no more than three short sentences). Provide exactly four answer options, each at most 90 characters and self-contained. Add a 2–3 sentence explanation that highlights why the correct answer works and why the others do not. Respond strictly as JSON with keys: topic, level, prompt, options (array of 4 strings), answer (must match one option exactly), explanation.`
 		return fmt.Sprintf(template, topic, lang)
 	}
 	return fmt.Sprintf(template, lang)
